@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>mujoco</name>
+  <maintainer email="robot_team@spacemit.com">robot_team</maintainer>
+  <version>0.1.0</version>
+  <description>MuJoCo simulation wrapper with SimState/SimControl interface (x86_64 only)</description>
+  <system_depend check="test $(uname -m) != x86_64 || pkg-config --exists glfw3">libglfw3-dev</system_depend>
+  <system_depend check="pkg-config --exists yaml-cpp">libyaml-cpp-dev</system_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>
