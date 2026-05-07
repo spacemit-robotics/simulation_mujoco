@@ -1,6 +1,6 @@
 # FindMuJoCo.cmake
 #
-# 查找 MuJoCo 头文件和库。支持用户通过变量或环境变量指定路径。
+# 查找 MuJoCo 头文件和库；找不到时自动拉取 prebuilt release 到 ~/.cache/thirdparty/。
 #
 # 输入变量（可选）:
 #   MUJOCO_DIR  — MuJoCo 安装根目录（CMake 变量或同名环境变量）
@@ -8,7 +8,36 @@
 # 输出变量:
 #   MUJOCO_INCLUDE_DIR  — 头文件目录（含 mujoco/mujoco.h）
 #   MUJOCO_LIB          — libmujoco 路径
+#
+# 查找优先级（先检测、再 fetch 兜底）:
+#   1. -DMUJOCO_DIR=...
+#   2. 环境变量 MUJOCO_DIR
+#   3. /usr/local、/opt/mujoco
+#   4. ~/.cache/thirdparty/mujoco/mujoco-3.4.0/（之前 fetch 留下的）
+#   5. 兜底：触发 fetch_thirdparty 拉取并解压到 cache，再次 find（仅 x86_64；rv64 由 CMakeLists.txt 早 return）
 
+set(_MJ_VERSION "3.4.0")
+set(_MJ_RELEASE "mujoco-${_MJ_VERSION}")
+set(_MJ_X64_URL "https://github.com/google-deepmind/mujoco/releases/download/${_MJ_VERSION}/${_MJ_RELEASE}-linux-x86_64.tar.gz")
+
+function(_mujoco_find_in_hints out_inc out_lib)
+    find_path(_mj_inc
+        NAMES mujoco/mujoco.h
+        HINTS ${ARGN}
+        PATH_SUFFIXES include
+        NO_DEFAULT_PATH
+    )
+    find_library(_mj_lib
+        NAMES mujoco
+        HINTS ${ARGN}
+        PATH_SUFFIXES lib
+        NO_DEFAULT_PATH
+    )
+    set(${out_inc} "${_mj_inc}" PARENT_SCOPE)
+    set(${out_lib} "${_mj_lib}" PARENT_SCOPE)
+endfunction()
+
+# ---- 步骤 1：组装 hints（含 cache 路径） ----
 set(_mujoco_hints "")
 if(DEFINED MUJOCO_DIR)
     list(APPEND _mujoco_hints "${MUJOCO_DIR}")
@@ -16,35 +45,35 @@ endif()
 if(DEFINED ENV{MUJOCO_DIR})
     list(APPEND _mujoco_hints "$ENV{MUJOCO_DIR}")
 endif()
-
-# ~/.mujoco/mujoco-*（通配不同版本号的安装）
-file(GLOB _home_mujoco "$ENV{HOME}/.mujoco/mujoco-*")
-list(SORT _home_mujoco ORDER DESCENDING)  # 版本号降序，优先用最新版
-list(APPEND _mujoco_hints ${_home_mujoco} "$ENV{HOME}/.mujoco")
-
-# 标准系统路径兜底
 list(APPEND _mujoco_hints /usr/local /opt/mujoco)
+if(DEFINED ENV{HOME})
+    list(APPEND _mujoco_hints "$ENV{HOME}/.cache/thirdparty/mujoco/${_MJ_RELEASE}")
+endif()
 
-find_path(MUJOCO_INCLUDE_DIR
-    NAMES mujoco/mujoco.h
-    HINTS ${_mujoco_hints}
-    PATH_SUFFIXES include
-    NO_DEFAULT_PATH
-)
+# ---- 步骤 2：先 find 一次（命中预装 / 已 fetch 的 cache） ----
+_mujoco_find_in_hints(MUJOCO_INCLUDE_DIR MUJOCO_LIB ${_mujoco_hints})
 
-find_library(MUJOCO_LIB
-    NAMES mujoco
-    HINTS ${_mujoco_hints}
-    PATH_SUFFIXES lib
-    NO_DEFAULT_PATH
-)
+# ---- 步骤 3：找不到 → 触发自动 fetch（仅 x86_64；rv64 走不到此处） ----
+if(NOT MUJOCO_INCLUDE_DIR OR NOT MUJOCO_LIB)
+    include("${CMAKE_CURRENT_LIST_DIR}/FetchThirdParty.cmake")
+    fetch_thirdparty(
+        NAME mujoco
+        ARCHIVE_URL "${_MJ_X64_URL}"
+        ARCHIVE_SUBDIR "${_MJ_RELEASE}"
+        OUT_SOURCE_DIR _mj_fetched_dir
+    )
+    unset(MUJOCO_INCLUDE_DIR CACHE)
+    unset(MUJOCO_LIB CACHE)
+    _mujoco_find_in_hints(MUJOCO_INCLUDE_DIR MUJOCO_LIB "${_mj_fetched_dir}" ${_mujoco_hints})
+endif()
 
+# ---- 步骤 4：仍找不到 → fatal ----
 if(NOT MUJOCO_INCLUDE_DIR OR NOT MUJOCO_LIB)
     message(FATAL_ERROR
         "MuJoCo not found.\n"
-        "  默认安装路径: ~/.mujoco/mujoco-3.x.x/\n"
-        "  或手动指定: cmake .. -DMUJOCO_DIR=/path/to/mujoco\n"
-        "  或设置环境变量: export MUJOCO_DIR=/path/to/mujoco")
+        "  网络不通时手动下载 ${_MJ_X64_URL}\n"
+        "  解压后 export MUJOCO_DIR=/path/to/${_MJ_RELEASE}\n"
+        "  或编译时显式指定: cmake .. -DMUJOCO_DIR=/path/to/${_MJ_RELEASE}")
 endif()
 
 message(STATUS "MuJoCo: ${MUJOCO_LIB}")

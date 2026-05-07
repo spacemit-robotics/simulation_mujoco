@@ -26,16 +26,20 @@
 **PC 端（x86_64）**：
 
 ```bash
-# 系统依赖
 sudo apt install -y libglfw3-dev libyaml-cpp-dev cmake g++
-
-# MuJoCo 3.4.0
-mkdir -p ~/.mujoco
-wget https://github.com/google-deepmind/mujoco/releases/download/3.4.0/mujoco-3.4.0-linux-x86_64.tar.gz
-tar -xzf mujoco-3.4.0-linux-x86_64.tar.gz -C ~/.mujoco/
 ```
 
-> CMake 查找顺序：`MUJOCO_DIR` 环境变量或编译参数 → `~/.mujoco/mujoco-*`（自动选最新版）→ `~/.mujoco` → `/usr/local` → `/opt/mujoco`。若安装到非默认路径，可通过 `export MUJOCO_DIR=/path/to/mujoco` 或编译时 `-DMUJOCO_DIR=/path/to/mujoco` 指定。其他版本见 [github.com/google-deepmind/mujoco/releases](https://github.com/google-deepmind/mujoco/releases)。
+MuJoCo 由 CMake 处理。CMake 按以下顺序查找，命中即用：
+
+1. `-DMUJOCO_DIR=...` 编译参数
+2. 环境变量 `MUJOCO_DIR`
+3. `/usr/local`、`/opt/mujoco`
+4. 缓存路径 `~/.cache/thirdparty/mujoco/mujoco-3.4.0/`
+5. 上述均未命中：从官方 release 拉取 `mujoco-3.4.0-linux-x86_64.tar.gz` 解压到第 4 项缓存路径
+
+> 离线/受限网络环境可设 `SROBOTIS_THIRDPARTY_FETCH_OFF=ON` 禁用第 6 步拉取，并通过
+> `export MUJOCO_DIR=/path/to/mujoco-3.4.0` 指向预先下载好的目录。其他版本见
+> [github.com/google-deepmind/mujoco/releases](https://github.com/google-deepmind/mujoco/releases)。
 
 > **注意**：本模块仅支持 **x86_64** 平台（MuJoCo 渲染依赖 OpenGL，不支持 RISC-V 交叉编译）。CMakeLists.txt 在非 x86_64 平台会自动跳过，无需手动处理。
 
