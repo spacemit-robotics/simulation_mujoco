@@ -18,8 +18,11 @@
  * --no-assist
  */
 
+#include <yaml-cpp/yaml.h>
+
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "mujoco_sim.h"
 
@@ -37,10 +40,14 @@ void PrintHelp(const char *argv0) {
     std::cout << "可选参数:\n";
     std::cout << "  -d, --duration SEC  仿真时长（秒），不指定则持续运行\n";
     std::cout << "  --no-assist         禁用悬挂保护\n";
+    std::cout << "  --robot-node NAME   YAML 中机器人固有属性所在的节点名（必填）；\n";
+    std::cout << "                      该节点下需含 default_joint_pos，可选 kp / kd\n";
     std::cout << "  -h, --help          显示帮助\n\n";
-    std::cout << "示例（从 output/ 目录运行）:\n";
+    std::cout << "示例（从 SDK 根目录运行）:\n";
     std::cout << "  " << argv0
-            << " ../../../application/config/g1.yaml g1 29 ../../../application/robot/g1\n";
+            << " application/native/humanoid_unitree_g1/config/g1.yaml"
+            << " g1 29 application/native/humanoid_unitree_g1"
+            << " --robot-node robot_base\n";
 }
 
 int main(int argc, char *argv[]) {
@@ -70,6 +77,7 @@ int main(int argc, char *argv[]) {
 
     double duration = -1;
     bool assist = true;
+    std::string robot_node_name;
 
     for (int i = 5; i < argc; i++) {
         std::string arg = argv[i];
@@ -77,11 +85,40 @@ int main(int argc, char *argv[]) {
             duration = std::stod(argv[++i]);
         } else if (arg == "--no-assist") {
             assist = false;
+        } else if (arg == "--robot-node" && i + 1 < argc) {
+            robot_node_name = argv[++i];
         }
     }
 
+    if (robot_node_name.empty()) {
+        std::cerr << "[错误] 必须通过 --robot-node 指定机器人固有属性的 YAML 节点名\n\n";
+        PrintHelp(argv[0]);
+        return 1;
+    }
+
+    // 从调用方指定的 yaml 节点读取机器人固有属性，传给 Simulator
+    std::vector<double> default_joint_pos;
+    std::vector<double> kp;
+    std::vector<double> kd;
     try {
-        Simulator sim(yaml_path, robot_name, num_dof, xml_path, assist);
+        YAML::Node cfg = YAML::LoadFile(yaml_path);
+        const auto rb = cfg[robot_node_name];
+        if (!rb || !rb["default_joint_pos"]) {
+            std::cerr << "[错误] yaml 节点 '" << robot_node_name
+                    << ".default_joint_pos' 不存在（用 --robot-node 指定其他节点名）\n";
+            return 1;
+        }
+        default_joint_pos = rb["default_joint_pos"].as<std::vector<double>>();
+        if (rb["kp"] && rb["kp"].IsSequence()) kp = rb["kp"].as<std::vector<double>>();
+        if (rb["kd"] && rb["kd"].IsSequence()) kd = rb["kd"].as<std::vector<double>>();
+    } catch (const std::exception &e) {
+        std::cerr << "[错误] 解析机器人 yaml 失败: " << e.what() << "\n";
+        return 1;
+    }
+
+    try {
+        Simulator sim(yaml_path, robot_name, num_dof, xml_path,
+                        default_joint_pos, kp, kd, assist);
         sim.Run(nullptr, nullptr, duration);
     } catch (const std::exception &e) {
         std::cerr << "[错误] " << e.what() << "\n";

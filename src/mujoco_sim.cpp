@@ -131,9 +131,16 @@ public:
             const std::string &robot_name,
             int num_dof,
             const std::string &xml_path,
+            const std::vector<double> &default_joint_pos,
+            const std::vector<double> &kp,
+            const std::vector<double> &kd,
             bool assist) {
-        // 加载配置
+        // 加载 mujoco 自己的仿真参数
         config = MujocoConfig::FromYaml(yaml_path, robot_name, num_dof, xml_path);
+        // 机器人固有属性由调用方传入
+        config.default_joint_pos = default_joint_pos;
+        config.kp = kp;
+        config.kd = kd;
         std::cout << "[MuJoCo] 机器人: " << config.name << std::endl;
 
         // 加载 MuJoCo 模型
@@ -431,10 +438,13 @@ public:
 
             if (is_position_actuator_) {
                 data->ctrl[i] = target_pos_[i];
-            } else {
+            } else if (static_cast<int>(current_kp_.size()) > i &&
+                static_cast<int>(current_kd_.size()) > i) {
                 double pos_error = target_pos_[i] - data->qpos[qpos_adr];
                 double vel_error = target_vel_[i] - data->qvel[qvel_adr];
                 data->ctrl[i] = current_kp_[i] * pos_error + current_kd_[i] * vel_error;
+            } else {
+                data->ctrl[i] = 0.0;  // kp/kd 未配置时关节被动（assist 兜底）
             }
         }
     }
@@ -545,9 +555,12 @@ Simulator::Simulator(const std::string &yaml_path,
                     const std::string &robot_name,
                     int num_dof,
                     const std::string &xml_path,
+                    const std::vector<double> &default_joint_pos,
+                    const std::vector<double> &kp,
+                    const std::vector<double> &kd,
                     bool assist)
     : impl_(std::make_unique<Impl>()) {
-    impl_->Init(yaml_path, robot_name, num_dof, xml_path, assist);
+    impl_->Init(yaml_path, robot_name, num_dof, xml_path, default_joint_pos, kp, kd, assist);
 }
 
 Simulator::~Simulator() {

@@ -66,23 +66,7 @@ MujocoConfig MujocoConfig::FromYaml(const std::string &yaml_path,
     config.assist_gravity_compensation =
         sim["assist_gravity_compensation"] ? sim["assist_gravity_compensation"].as<double>() : 0.0;
 
-    // ==================== 控制器参数 ====================
-
-    const auto ctrl = sim["controller"];
-    if (!ctrl || !ctrl["kp"]) {
-        throw std::runtime_error("[MujocoConfig] 配置文件缺少 simulation.mujoco.controller.kp");
-    }
-    if (!ctrl["kd"]) {
-        throw std::runtime_error("[MujocoConfig] 配置文件缺少 simulation.mujoco.controller.kd");
-    }
-    if (!ctrl["default_joint_pos"]) {
-        throw std::runtime_error(
-            "[MujocoConfig] 配置文件缺少 simulation.mujoco.controller.default_joint_pos");
-    }
-
-    config.kp = ctrl["kp"].as<std::vector<double>>();
-    config.kd = ctrl["kd"].as<std::vector<double>>();
-    config.default_joint_pos = ctrl["default_joint_pos"].as<std::vector<double>>();
+    // default_joint_pos / kp / kd 由 Simulator 构造函数从外部传入，不在此处读取。
 
     return config;
 }
