@@ -70,13 +70,15 @@ struct MujocoConfig {
     std::vector<double> default_joint_pos;
 
     /**
-     * @brief 从 YAML 文件加载配置
+     * @brief 从 YAML 文件加载 mujoco 自己的仿真参数
      * @param yaml_path YAML 配置文件路径（绝对路径或相对于 cwd 的路径）
      * @param robot_name 机器人名称（用于日志标识）
      * @param num_dof 控制自由度数量
      * @param xml_path MuJoCo XML 模型文件的绝对路径
      *
-     * YAML 中需包含 simulation.mujoco 节点（sim_dt、controller 等仿真参数）。
+     * 仅读取 YAML 的 simulation.mujoco 节点（init_height / sim_dt / assist_* 等）。
+     * default_joint_pos / kp / kd 等机器人固有属性不在此读取，由调用方通过
+     * Simulator 构造函数显式传入。
      */
     static MujocoConfig FromYaml(const std::string &yaml_path,
                                 const std::string &robot_name,
@@ -102,15 +104,22 @@ class Simulator {
 public:
     /**
      * @param yaml_path YAML 配置文件路径（绝对路径或相对于 cwd 的路径）
+     *                  仅用于读取 simulation.mujoco 节点
      * @param robot_name 机器人名称
      * @param num_dof 控制自由度数量
      * @param xml_path MuJoCo XML 模型文件的绝对路径
+     * @param default_joint_pos 默认关节角度（自然站立姿态），大小 = num_dof
+     * @param kp MuJoCo 启动初始 PD 刚度（可选，空则关节被动；进入 RL 后由控制命令覆盖）
+     * @param kd MuJoCo 启动初始 PD 阻尼（可选，与 kp 配对）
      * @param assist 是否启用悬挂保护
      */
     Simulator(const std::string &yaml_path,
             const std::string &robot_name,
             int num_dof,
             const std::string &xml_path,
+            const std::vector<double> &default_joint_pos,
+            const std::vector<double> &kp = {},
+            const std::vector<double> &kd = {},
             bool assist = true);
     ~Simulator();
 
