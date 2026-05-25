@@ -97,7 +97,7 @@ public:
     bool assist_enabled_ = true;
     double assist_kp_ = 500.0;
     double assist_kd_ = 100.0;
-    double assist_gravity_compensation_ = 0.0;
+    double gravity_compensation_ = 0.0;  // 整机重力前馈，Init 时按模型总质量自动计算
     double target_assist_height_ = 0.75;   // 目标悬挂高度
     double current_assist_height_ = 0.75;  // 当前悬挂高度（用于平滑过渡）
 
@@ -176,7 +176,8 @@ public:
         // 悬挂PD增益（从YAML配置加载，不同机器人可独立配置）
         assist_kp_ = config.assist_kp;
         assist_kd_ = config.assist_kd;
-        assist_gravity_compensation_ = config.assist_gravity_compensation;
+        // 整机重力前馈：按模型总质量自动抵消重力，使悬挂稳态精确停在 assist_height
+        gravity_compensation_ = mj_getTotalmass(model) * std::abs(model->opt.gravity[2]);
 
         // 初始化控制器
         target_pos_ = config.default_joint_pos;
@@ -397,7 +398,7 @@ public:
         double force_z =
             assist_kp_ * (current_assist_height_ - data->qpos[2]) - assist_kd_ * data->qvel[2];
         ClipValue(force_z, max_force_z);
-        data->xfrc_applied[base_body_id_ * 6 + 2] = force_z + assist_gravity_compensation_;
+        data->xfrc_applied[base_body_id_ * 6 + 2] = force_z + gravity_compensation_;
 
         // 姿态恢复力
         const mjtNum *q = data->qpos + 3;
