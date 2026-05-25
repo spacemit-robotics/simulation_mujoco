@@ -140,7 +140,6 @@ cd ~/spacemit_robot
 | `assist_height` | `double` | 悬挂保护目标高度（m），默认 0.75 |
 | `assist_kp` | `double` | 悬挂 PD 刚度，默认 500.0 |
 | `assist_kd` | `double` | 悬挂 PD 阻尼，默认 100.0 |
-| `assist_gravity_compensation` | `double` | 额外恒定向上力（N），重型机器人可用，默认 0.0 |
 | `sim_dt` | `double` | 仿真时间步长（s） |
 | `kp` / `kd` | `std::vector<double>` | 各关节 PD 增益，大小 = num_dof |
 | `default_joint_pos` | `std::vector<double>` | 默认关节角度（初始站立姿态），大小 = num_dof |

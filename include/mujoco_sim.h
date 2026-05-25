@@ -59,7 +59,6 @@ struct MujocoConfig {
     static constexpr double kAssistHeightRate = 5.0;  // 悬挂高度变化速率 (m/s)
     double assist_kp = 500.0;  // 悬挂 PD 刚度（默认适用于轻量机器人）
     double assist_kd = 100.0;  // 悬挂 PD 阻尼
-    double assist_gravity_compensation = 0.0;  // 额外恒定向上力（N），用于重型机器人抵消重力
 
     // 仿真参数
     double sim_dt = 0.002;

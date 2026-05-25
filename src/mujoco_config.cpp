@@ -63,8 +63,6 @@ MujocoConfig MujocoConfig::FromYaml(const std::string &yaml_path,
 
     config.assist_kp = sim["assist_kp"] ? sim["assist_kp"].as<double>() : 500.0;
     config.assist_kd = sim["assist_kd"] ? sim["assist_kd"].as<double>() : 100.0;
-    config.assist_gravity_compensation =
-        sim["assist_gravity_compensation"] ? sim["assist_gravity_compensation"].as<double>() : 0.0;
 
     // default_joint_pos / kp / kd 由 Simulator 构造函数从外部传入，不在此处读取。
 
