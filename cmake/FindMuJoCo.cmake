@@ -13,12 +13,19 @@
 #   1. -DMUJOCO_DIR=...
 #   2. 环境变量 MUJOCO_DIR
 #   3. /usr/local、/opt/mujoco
-#   4. ~/.cache/thirdparty/mujoco/mujoco-3.4.0/（之前 fetch 留下的）
-#   5. 兜底：触发 fetch_thirdparty 拉取并解压到 cache，再次 find（仅 x86_64；rv64 由 CMakeLists.txt 早 return）
+#   4. ~/.cache/thirdparty/mujoco/mujoco-<版本>/（之前 fetch 留下的；版本随架构而定）
+#   5. 兜底：触发 fetch_thirdparty 拉取并解压到 cache，再次 find（x86_64 取官方包，riscv64 取 SpaceMIT archive 包）
 
+# 预编译包版本统一 3.4.0，来源按架构区分（包内布局一致：include/mujoco + lib/libmujoco.so）：
+#   x86_64  → MuJoCo 官方 GitHub release
+#   riscv64 → SpaceMIT bianbu26 prebuilt_libs（官方无 riscv64 release）
 set(_MJ_VERSION "3.4.0")
 set(_MJ_RELEASE "mujoco-${_MJ_VERSION}")
-set(_MJ_X64_URL "https://github.com/google-deepmind/mujoco/releases/download/${_MJ_VERSION}/${_MJ_RELEASE}-linux-x86_64.tar.gz")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64|riscv")
+    set(_MJ_URL "https://archive.spacemit.com/ros2/prebuilt_libs/bianbu26/opt/ext/mujoco/${_MJ_RELEASE}.tar.gz")
+else()
+    set(_MJ_URL "https://github.com/google-deepmind/mujoco/releases/download/${_MJ_VERSION}/${_MJ_RELEASE}-linux-x86_64.tar.gz")
+endif()
 
 function(_mujoco_find_in_hints out_inc out_lib)
     find_path(_mj_inc
@@ -53,12 +60,12 @@ endif()
 # ---- 步骤 2：先 find 一次（命中预装 / 已 fetch 的 cache） ----
 _mujoco_find_in_hints(MUJOCO_INCLUDE_DIR MUJOCO_LIB ${_mujoco_hints})
 
-# ---- 步骤 3：找不到 → 触发自动 fetch（仅 x86_64；rv64 走不到此处） ----
+# ---- 步骤 3：找不到 → 触发自动 fetch（按架构拉对应预编译包，见顶部 _MJ_URL） ----
 if(NOT MUJOCO_INCLUDE_DIR OR NOT MUJOCO_LIB)
     include("${CMAKE_CURRENT_LIST_DIR}/FetchThirdParty.cmake")
     fetch_thirdparty(
         NAME mujoco
-        ARCHIVE_URL "${_MJ_X64_URL}"
+        ARCHIVE_URL "${_MJ_URL}"
         ARCHIVE_SUBDIR "${_MJ_RELEASE}"
         OUT_SOURCE_DIR _mj_fetched_dir
     )
@@ -71,7 +78,7 @@ endif()
 if(NOT MUJOCO_INCLUDE_DIR OR NOT MUJOCO_LIB)
     message(FATAL_ERROR
         "MuJoCo not found.\n"
-        "  网络不通时手动下载 ${_MJ_X64_URL}\n"
+        "  网络不通时手动下载 ${_MJ_URL}\n"
         "  解压后 export MUJOCO_DIR=/path/to/${_MJ_RELEASE}\n"
         "  或编译时显式指定: cmake .. -DMUJOCO_DIR=/path/to/${_MJ_RELEASE}")
 endif()

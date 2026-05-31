@@ -3,8 +3,10 @@
   <name>mujoco</name>
   <maintainer email="robot_team@spacemit.com">robot_team</maintainer>
   <version>0.1.0</version>
-  <description>MuJoCo simulation wrapper with SimState/SimControl interface (x86_64 only)</description>
+  <description>MuJoCo simulation wrapper with SimState/SimControl interface (x86_64 + riscv64/K3)</description>
+  <!-- x86_64：窗口用 GLFW；riscv64/K3：窗口用 X11 -->
   <system_depend arch="x86_64" check="pkg-config --exists glfw3">libglfw3-dev</system_depend>
+  <system_depend arch="riscv64" check="pkg-config --exists x11">libx11-dev</system_depend>
   <system_depend check="pkg-config --exists yaml-cpp">libyaml-cpp-dev</system_depend>
 
   <export>
