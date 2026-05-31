@@ -105,6 +105,18 @@ cd ~/spacemit_robot
 | 滚轮 | 缩放 |
 | 关闭窗口 | 退出仿真 |
 
+### CI 测试
+
+模块自带 `test.yaml`（CI 用例清单）+ `tests/`，经 SDK 根目录的 `robot-test` 运行：
+
+```bash
+scripts/test/robot-test list components/simulation/mujoco
+scripts/test/robot-test run  components/simulation/mujoco --scope pr     # 参数/配置错误路径（无需显示器）
+scripts/test/robot-test run  components/simulation/mujoco --scope manual # 渲染+物理冒烟（需桌面会话/显示器）
+```
+
+`MujocoSim` 构造即建 GL 窗口、无 headless，故渲染冒烟归 manual；PR 档只验错误处理。
+
 ## 详细使用
 
 ### 接口说明

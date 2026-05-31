@@ -1,0 +1,30 @@
+module: components/simulation/mujoco
+
+# 说明：MujocoSim 构造即创建 GL 窗口（无 headless 模式），故渲染/物理冒烟需桌面会话，
+# 归 manual。PR 档只验参数/配置错误处理（在窗口创建前失败，不需要显示器）。
+
+tests:
+  - name: mujoco-error-path
+    description: >
+      test_mujoco 参数与配置错误处理：缺参、坏 yaml 路径须快速失败（非 0、不 hang），
+      失败发生在加载配置阶段、早于窗口创建，故无需显示器。
+    category: functional
+    scopes: [pr]
+    timeout_s: 60
+    requires:
+      commands: [test_mujoco]
+    command: |
+      bash tests/error_path.sh
+
+  - name: mujoco-sim-smoke
+    description: >
+      渲染 + 物理冒烟：用机型配置加载模型、跑数秒物理与渲染，进程正常退出即通过。
+      依赖桌面会话/显示器（x86 GLFW，K3 gl4es），故归 manual。
+    category: stability
+    scopes: [manual]
+    timeout_s: 120
+    workdir: sdk
+    requires:
+      commands: [test_mujoco]
+    command: |
+      bash components/simulation/mujoco/tests/sim_smoke.sh
