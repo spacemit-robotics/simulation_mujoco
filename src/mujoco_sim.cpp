@@ -120,12 +120,13 @@ public:
     bool is_position_actuator_ = false;
 
     // 悬挂控制
-    bool assist_enabled_ = true;
+    // 以下三个量由渲染线程（riscv X11 按键）与物理线程 Step 并发访问，用 atomic；data_mutex_ 只保护 mjData。
+    std::atomic<bool> assist_enabled_{true};
     double assist_kp_ = 500.0;
     double assist_kd_ = 100.0;
     double gravity_compensation_ = 0.0;  // 整机重力前馈，Init 时按模型总质量自动计算
-    double target_assist_height_ = 0.75;   // 目标悬挂高度
-    double current_assist_height_ = 0.75;  // 当前悬挂高度（用于平滑过渡）
+    std::atomic<double> target_assist_height_{0.75};   // 目标悬挂高度
+    std::atomic<double> current_assist_height_{0.75};  // 当前悬挂高度（用于平滑过渡）
 
     // 仿真状态
     int step_count_ = 0;
@@ -570,9 +571,10 @@ public:
         double max_change = MujocoConfig::kAssistHeightRate * model->opt.timestep;
 
         if (std::abs(height_diff) > max_change) {
-            current_assist_height_ += std::copysign(max_change, height_diff);
+            // 仅物理线程写 current_assist_height_；atomic<double> 在 C++17 无 += 运算符
+            current_assist_height_ = current_assist_height_ + std::copysign(max_change, height_diff);
         } else {
-            current_assist_height_ = target_assist_height_;
+            current_assist_height_ = target_assist_height_.load();
         }
 
         // 无高度限制，可以无限调节

@@ -8,6 +8,7 @@ ROBOT_DIR=${SROBOTIS_MJ_TEST_ROBOT_DIR:-application/native/humanoid_unitree_g1}
 CONFIG=${SROBOTIS_MJ_TEST_CONFIG:-$ROBOT_DIR/config/g1.yaml}
 ROBOT_NAME=${SROBOTIS_MJ_TEST_ROBOT_NAME:-g1}
 NUM_DOF=${SROBOTIS_MJ_TEST_NUM_DOF:-29}
+ROBOT_NODE=${SROBOTIS_MJ_TEST_ROBOT_NODE:-robot_base}
 DURATION=${SROBOTIS_MJ_TEST_DURATION:-3}
 
 if [[ -z "${DISPLAY:-}" ]]; then
@@ -18,7 +19,7 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 # --no-assist 关悬挂保护跑自由下落也可；这里保留默认。跑 DURATION 秒后正常退出。
-if timeout $((DURATION + 30)) test_mujoco "$CONFIG" "$ROBOT_NAME" "$NUM_DOF" "$ROBOT_DIR" -d "$DURATION"; then
+if timeout $((DURATION + 30)) test_mujoco "$CONFIG" "$ROBOT_NAME" "$NUM_DOF" "$ROBOT_DIR" --robot-node "$ROBOT_NODE" -d "$DURATION"; then
   echo "mujoco sim-smoke: PASS ($ROBOT_NAME, ${DURATION}s)"
 else
   rc=$?
