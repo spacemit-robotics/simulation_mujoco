@@ -8,14 +8,25 @@
 
 #include "mujoco_sim.h"
 
+#if defined(__riscv)
+// riscv64（K3）：裸 X11 + 老式 GLX 窗口，配合 gl4es 把桌面 GL 翻译到 PowerVR 硬件 GLES；不走 GLFW
+#include <GL/glx.h>
+#include <X11/Xlib.h>
+#include <X11/keysym.h>
+#else
 #include <GLFW/glfw3.h>
+#endif
+
 #include <mujoco/mujoco.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>  // NOLINT(build/c++17)
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -78,7 +89,22 @@ public:
     mjvOption opt;
     mjvScene scn;
     mjrContext con;
+#if defined(__riscv)
+    // X11/GLX 窗口后端（配合 gl4es），渲染在独立线程
+    Display *x_display_ = nullptr;
+    Window x_window_ = 0;
+    GLXContext glx_ctx_ = nullptr;
+    Atom wm_delete_ = 0;
+    std::atomic<bool> should_close_{false};
+    std::atomic<bool> render_running_{false};
+    std::thread render_thread_;
+    std::mutex data_mutex_;  // 保护 mjData：物理 Step 与渲染 mjv_updateScene 互斥
+#else
     GLFWwindow *window = nullptr;
+#endif
+    int win_width_ = kWindowWidth;
+    int win_height_ = kWindowHeight;
+    bool gl_ready_ = false;  // GL 上下文 + 场景已创建（Cleanup 守卫）
 
     // 配置
     MujocoConfig config;
@@ -94,12 +120,13 @@ public:
     bool is_position_actuator_ = false;
 
     // 悬挂控制
-    bool assist_enabled_ = true;
+    // 以下三个量由渲染线程（riscv X11 按键）与物理线程 Step 并发访问，用 atomic；data_mutex_ 只保护 mjData。
+    std::atomic<bool> assist_enabled_{true};
     double assist_kp_ = 500.0;
     double assist_kd_ = 100.0;
     double gravity_compensation_ = 0.0;  // 整机重力前馈，Init 时按模型总质量自动计算
-    double target_assist_height_ = 0.75;   // 目标悬挂高度
-    double current_assist_height_ = 0.75;  // 当前悬挂高度（用于平滑过渡）
+    std::atomic<double> target_assist_height_{0.75};   // 目标悬挂高度
+    std::atomic<double> current_assist_height_{0.75};  // 当前悬挂高度（用于平滑过渡）
 
     // 仿真状态
     int step_count_ = 0;
@@ -190,25 +217,12 @@ public:
         target_assist_height_ = config.assist_height;
         current_assist_height_ = config.assist_height;
 
-        // 初始化 GLFW
-        if (!glfwInit()) {
-            throw std::runtime_error("GLFW 初始化失败");
-        }
-
-        window =
-            glfwCreateWindow(kWindowWidth, kWindowHeight, "MuJoCo Simulator", nullptr, nullptr);
-        glfwMakeContextCurrent(window);
-        glfwSwapInterval(1);
-
-        // 窗口置顶（GLFW 3.2+ 才支持）
-#if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 2)
-        glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_TRUE);
-        std::cout << "[MuJoCo] 窗口置顶: 成功" << std::endl;
-#else
-        std::cout << "[MuJoCo] 窗口置顶: 不支持 (需要 GLFW 3.2+)" << std::endl;
+        // x86：在此建窗口+GL 上下文；riscv64：推迟到渲染线程（见 RenderLoop）。
+#if !defined(__riscv)
+        WindowInit();
 #endif
 
-        // 初始化渲染
+        // 初始化渲染（mjv_* 纯 CPU，主线程；mjr_makeContext 需 GL 上下文）
         mjv_defaultCamera(&cam);
         cam.lookat[2] = kCameraLookatZ;
         cam.azimuth = kCameraAzimuth;
@@ -218,15 +232,22 @@ public:
         mjv_defaultOption(&opt);
         mjv_defaultScene(&scn);
         mjr_defaultContext(&con);
-        mjv_makeScene(model, &scn, kMaxSceneObjects);
-        mjr_makeContext(model, &con, mjFONTSCALE_100);
 
-        // 设置回调
-        glfwSetWindowUserPointer(window, this);
-        glfwSetKeyCallback(window, KeyCallback);
-        glfwSetCursorPosCallback(window, MouseMove);
-        glfwSetMouseButtonCallback(window, MouseButton);
-        glfwSetScrollCallback(window, Scroll);
+#if defined(__riscv)
+        // riscv64（K3 PowerVR/gl4es）：关 MSAA、阴影。
+        model->vis.quality.offsamples = 0;
+        model->vis.quality.shadowsize = 0;
+#endif
+
+        mjv_makeScene(model, &scn, kMaxSceneObjects);
+#if !defined(__riscv)
+        mjr_makeContext(model, &con, mjFONTSCALE_100);
+        gl_ready_ = true;
+#else
+        // riscv：mjr_makeContext 在渲染线程内调用（GL 上下文归该线程）；这里只设场景渲染标志
+        scn.flags[mjRND_SHADOW] = 0;
+        scn.flags[mjRND_REFLECTION] = 0;
+#endif
 
         PrintInfo();
     }
@@ -252,28 +273,228 @@ public:
         return 1;
     }
 
-    // ==================== 回调函数 ====================
+    // ==================== 窗口 / GL 后端 ====================
 
+    // 创建窗口与桌面 GL 上下文。
+    // riscv64：X11 窗口 + 老式 glXCreateContext，经 gl4es 把桌面 GL 翻译到 PowerVR GLES。
+    // x86_64：GLFW。
+    void WindowInit() {
+#if defined(__riscv)
+        // gl4es 运行时配置，须在首个 GLX 调用（下方 glXChooseVisual）前设置，gl4es 惰性初始化时读取。
+        // 第三参 0：不覆盖调用方已显式设置的值。
+        setenv("LIBGL_GL", "21", 0);  // gl4es 声称支持的桌面 GL 版本 = 2.1
+        setenv("LIBGL_ES", "2", 0);   // gl4es 翻译目标后端 = GLES 2.0
+        XInitThreads();  // 渲染线程内做 X11 调用，须先开启 Xlib 多线程支持
+        x_display_ = XOpenDisplay(nullptr);
+        if (!x_display_) {
+            throw std::runtime_error("无法打开 X11 Display（须在带显示的桌面会话内运行，检查 DISPLAY）");
+        }
+        // 含 stencil（MuJoCo 渲染器需要模板缓冲，缺失会导致地面等区域渲染异常）
+        int attribs[] = {GLX_RGBA, GLX_DEPTH_SIZE, 24, GLX_STENCIL_SIZE, 8, GLX_DOUBLEBUFFER, None};
+        XVisualInfo *vi = glXChooseVisual(x_display_, DefaultScreen(x_display_), attribs);
+        if (!vi) {
+            throw std::runtime_error("glXChooseVisual 失败");
+        }
+        Window root = DefaultRootWindow(x_display_);
+        XSetWindowAttributes swa;
+        swa.colormap = XCreateColormap(x_display_, root, vi->visual, AllocNone);
+        swa.event_mask = ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask |
+                        PointerMotionMask | StructureNotifyMask;
+        x_window_ = XCreateWindow(x_display_, root, 0, 0, kWindowWidth, kWindowHeight, 0, vi->depth,
+                                InputOutput, vi->visual, CWColormap | CWEventMask, &swa);
+        XStoreName(x_display_, x_window_, "MuJoCo Simulator");
+        wm_delete_ = XInternAtom(x_display_, "WM_DELETE_WINDOW", False);
+        XSetWMProtocols(x_display_, x_window_, &wm_delete_, 1);
+        XMapWindow(x_display_, x_window_);
+        glx_ctx_ = glXCreateContext(x_display_, vi, nullptr, GL_TRUE);
+        XFree(vi);
+        if (!glx_ctx_) {
+            throw std::runtime_error("glXCreateContext 失败（gl4es libGL 未生效？确认已随构建装入 staging/lib）");
+        }
+        glXMakeCurrent(x_display_, x_window_, glx_ctx_);
+        std::cout << "[MuJoCo] 渲染后端: X11/GLX + gl4es (PowerVR 硬件 GLES)" << std::endl;
+#else
+        if (!glfwInit()) {
+            throw std::runtime_error("GLFW 初始化失败");
+        }
+        window =
+            glfwCreateWindow(kWindowWidth, kWindowHeight, "MuJoCo Simulator", nullptr, nullptr);
+        if (!window) {
+            throw std::runtime_error("GLFW 创建窗口失败");
+        }
+        glfwMakeContextCurrent(window);
+        glfwSwapInterval(1);
+#if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 2)
+        glfwSetWindowAttrib(window, GLFW_FLOATING, GLFW_TRUE);
+#endif
+        glfwSetWindowUserPointer(window, this);
+        glfwSetKeyCallback(window, KeyCallback);
+        glfwSetCursorPosCallback(window, MouseMove);
+        glfwSetMouseButtonCallback(window, MouseButton);
+        glfwSetScrollCallback(window, Scroll);
+        std::cout << "[MuJoCo] 渲染后端: GLFW" << std::endl;
+#endif
+    }
+
+    // ---- 共享输入语义（GLFW 回调与 X11 事件循环共用） ----
+    void InputToggleAssist() {
+        assist_enabled_ = !assist_enabled_;
+        std::cout << "\n[MuJoCo] 悬挂保护: " << (assist_enabled_ ? "启用" : "禁用") << std::endl;
+    }
+    void InputAdjustAssist(double delta) {
+        AdjustAssistHeight(delta);
+        std::cout << "\n[MuJoCo] 目标悬挂高度: " << GetAssistHeight() << "m"
+                << " (当前: " << GetCurrentAssistHeight() << "m)" << std::endl;
+    }
+    void InputResetAssist() {
+        SetAssistHeight(config.assist_height);
+        std::cout << "\n[MuJoCo] 重置悬挂高度到默认值: " << GetAssistHeight() << "m" << std::endl;
+    }
+    void InputDrag(double dx, double dy, int height, bool shift) {
+        if (!button_left_ && !button_middle_ && !button_right_) {
+            return;
+        }
+        if (height <= 0) {
+            height = 1;
+        }
+        mjtMouse action;
+        if (button_right_) {
+            action = shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
+        } else if (button_left_) {
+            action = shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
+        } else {
+            action = mjMOUSE_ZOOM;
+        }
+        mjv_moveCamera(model, action, dx / height, dy / height, &scn, &cam);
+    }
+    void InputScroll(double yoffset) {
+        mjv_moveCamera(model, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn, &cam);
+    }
+
+#if defined(__riscv)
+    // 处理 X11 事件队列（替代 glfwPollEvents），分发键鼠到共享输入语义
+    void ProcessX11Events() {
+        while (XPending(x_display_)) {
+            XEvent ev;
+            XNextEvent(x_display_, &ev);
+            switch (ev.type) {
+                case ConfigureNotify:
+                    win_width_ = ev.xconfigure.width;
+                    win_height_ = ev.xconfigure.height;
+                    break;
+                case KeyPress: {
+                    KeySym ks = XLookupKeysym(&ev.xkey, 0);
+                    if (ks == XK_f || ks == XK_F) {
+                        InputToggleAssist();
+                    } else if (ks == XK_Up) {
+                        InputAdjustAssist(0.05);
+                    } else if (ks == XK_Down) {
+                        InputAdjustAssist(-0.05);
+                    } else if (ks == XK_r || ks == XK_R) {
+                        InputResetAssist();
+                    } else if (ks == XK_Escape) {
+                        should_close_ = true;
+                    }
+                    break;
+                }
+                case ButtonPress:
+                    if (ev.xbutton.button == Button1) {
+                        button_left_ = true;
+                    } else if (ev.xbutton.button == Button2) {
+                        button_middle_ = true;
+                    } else if (ev.xbutton.button == Button3) {
+                        button_right_ = true;
+                    } else if (ev.xbutton.button == Button4) {
+                        InputScroll(1.0);
+                    } else if (ev.xbutton.button == Button5) {
+                        InputScroll(-1.0);
+                    }
+                    last_x_ = ev.xbutton.x;
+                    last_y_ = ev.xbutton.y;
+                    break;
+                case ButtonRelease:
+                    if (ev.xbutton.button == Button1) {
+                        button_left_ = false;
+                    } else if (ev.xbutton.button == Button2) {
+                        button_middle_ = false;
+                    } else if (ev.xbutton.button == Button3) {
+                        button_right_ = false;
+                    }
+                    break;
+                case MotionNotify: {
+                    double x = ev.xmotion.x;
+                    double y = ev.xmotion.y;
+                    double dx = x - last_x_;
+                    double dy = y - last_y_;
+                    last_x_ = x;
+                    last_y_ = y;
+                    bool shift = (ev.xmotion.state & ShiftMask) != 0;
+                    InputDrag(dx, dy, win_height_, shift);
+                    break;
+                }
+                case ClientMessage:
+                    if (static_cast<Atom>(ev.xclient.data.l[0]) == wm_delete_) {
+                        should_close_ = true;
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    // 渲染线程：独占 GL 上下文（窗口/上下文/mjr_makeContext 都在本线程建立）。
+    void RenderLoop() {
+        try {
+            WindowInit();  // 本线程创建 X11 窗口 + GLX 上下文 + glXMakeCurrent
+            mjr_makeContext(model, &con, mjFONTSCALE_100);
+            gl_ready_ = true;
+            while (render_running_ && !should_close_) {
+                {
+                    std::lock_guard<std::mutex> lk(data_mutex_);
+                    mjv_updateScene(model, data, &opt, nullptr, &cam, mjCAT_ALL, &scn);
+                }
+                mjrRect viewport = {0, 0, win_width_, win_height_};
+                mjr_render(viewport, &scn, &con);
+                glXSwapBuffers(x_display_, x_window_);
+                ProcessX11Events();
+            }
+            glXMakeCurrent(x_display_, None, nullptr);  // 退出前释放上下文，便于主线程清理
+        } catch (const std::exception &e) {
+            std::cerr << "[MuJoCo] 渲染线程异常: " << e.what() << std::endl;
+            should_close_ = true;
+        }
+    }
+
+    void StartRenderThread() {
+        render_running_ = true;
+        render_thread_ = std::thread(&Impl::RenderLoop, this);
+    }
+
+    void StopRenderThread() {
+        render_running_ = false;
+        if (render_thread_.joinable()) {
+            render_thread_.join();
+        }
+    }
+#endif
+
+    // ==================== GLFW 回调（仅 x86；riscv 走 ProcessX11Events） ====================
+
+#if !defined(__riscv)
     static void KeyCallback(GLFWwindow *win, int key, int scancode, int act, int mods) {
         auto *impl = static_cast<Impl *>(glfwGetWindowUserPointer(win));
-        if (act == GLFW_PRESS) {
-            if (key == GLFW_KEY_F) {
-                impl->assist_enabled_ = !impl->assist_enabled_;
-                std::cout << "\n[MuJoCo] 悬挂保护: " << (impl->assist_enabled_ ? "启用" : "禁用")
-                        << std::endl;
-            } else if (key == GLFW_KEY_UP) {
-                impl->AdjustAssistHeight(0.05);  // 增加5cm
-                std::cout << "\n[MuJoCo] 目标悬挂高度: " << impl->GetAssistHeight() << "m"
-                        << " (当前: " << impl->GetCurrentAssistHeight() << "m)" << std::endl;
-            } else if (key == GLFW_KEY_DOWN) {
-                impl->AdjustAssistHeight(-0.05);  // 减少5cm
-                std::cout << "\n[MuJoCo] 目标悬挂高度: " << impl->GetAssistHeight() << "m"
-                        << " (当前: " << impl->GetCurrentAssistHeight() << "m)" << std::endl;
-            } else if (key == GLFW_KEY_R) {
-                impl->SetAssistHeight(impl->config.assist_height);  // 重置到默认高度
-                std::cout << "\n[MuJoCo] 重置悬挂高度到默认值: " << impl->GetAssistHeight() << "m"
-                        << std::endl;
-            }
+        if (act != GLFW_PRESS) {
+            return;
+        }
+        if (key == GLFW_KEY_F) {
+            impl->InputToggleAssist();
+        } else if (key == GLFW_KEY_UP) {
+            impl->InputAdjustAssist(0.05);
+        } else if (key == GLFW_KEY_DOWN) {
+            impl->InputAdjustAssist(-0.05);
+        } else if (key == GLFW_KEY_R) {
+            impl->InputResetAssist();
         }
     }
 
@@ -287,36 +508,22 @@ public:
 
     static void MouseMove(GLFWwindow *win, double xpos, double ypos) {
         auto *impl = static_cast<Impl *>(glfwGetWindowUserPointer(win));
-        if (!impl->button_left_ && !impl->button_middle_ && !impl->button_right_)
-            return;
-
         double dx = xpos - impl->last_x_;
         double dy = ypos - impl->last_y_;
         impl->last_x_ = xpos;
         impl->last_y_ = ypos;
-
         int width, height;
         glfwGetWindowSize(win, &width, &height);
-
-        bool mod_shift = (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                        glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
-
-        mjtMouse action;
-        if (impl->button_right_) {
-            action = mod_shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
-        } else if (impl->button_left_) {
-            action = mod_shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
-        } else {
-            action = mjMOUSE_ZOOM;
-        }
-
-        mjv_moveCamera(impl->model, action, dx / height, dy / height, &impl->scn, &impl->cam);
+        bool shift = (glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                    glfwGetKey(win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        impl->InputDrag(dx, dy, height, shift);
     }
 
     static void Scroll(GLFWwindow *win, double xoffset, double yoffset) {
         auto *impl = static_cast<Impl *>(glfwGetWindowUserPointer(win));
-        mjv_moveCamera(impl->model, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &impl->scn, &impl->cam);
+        impl->InputScroll(yoffset);
     }
+#endif
 
     // ==================== 仿真控制 ====================
 
@@ -364,9 +571,10 @@ public:
         double max_change = MujocoConfig::kAssistHeightRate * model->opt.timestep;
 
         if (std::abs(height_diff) > max_change) {
-            current_assist_height_ += std::copysign(max_change, height_diff);
+            // 仅物理线程写 current_assist_height_；atomic<double> 在 C++17 无 += 运算符
+            current_assist_height_ = current_assist_height_ + std::copysign(max_change, height_diff);
         } else {
-            current_assist_height_ = target_assist_height_;
+            current_assist_height_ = target_assist_height_.load();
         }
 
         // 无高度限制，可以无限调节
@@ -460,6 +668,8 @@ public:
         step_count_++;
     }
 
+#if !defined(__riscv)
+    // riscv 下渲染由 RenderLoop 在独立线程负责，不走此路径。
     void Render() {
         mjrRect viewport = {0, 0, 0, 0};
         glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
@@ -468,9 +678,15 @@ public:
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
+#endif
 
     bool IsAlive() const {
+#if defined(__riscv)
+        // 窗口在渲染线程创建，物理循环以 render_running_ 为存活依据（窗口关闭→should_close_）
+        return render_running_ && !should_close_;
+#else
         return window && !glfwWindowShouldClose(window);
+#endif
     }
 
     // 悬挂高度控制
@@ -530,9 +746,21 @@ public:
     }
 
     void Cleanup() {
-        if (window) {
+#if defined(__riscv)
+        // 确保渲染线程已停（正常 Run 结束时已 join；此处兜底）
+        render_running_ = false;
+        if (render_thread_.joinable()) {
+            render_thread_.join();
+        }
+        // 渲染线程退出时已释放上下文；主线程取回以便释放 GL 资源
+        if (gl_ready_ && x_display_ && glx_ctx_) {
+            glXMakeCurrent(x_display_, x_window_, glx_ctx_);
+        }
+#endif
+        if (gl_ready_) {
             mjv_freeScene(&scn);
             mjr_freeContext(&con);
+            gl_ready_ = false;
         }
         if (data) {
             mj_deleteData(data);
@@ -542,11 +770,27 @@ public:
             mj_deleteModel(model);
             model = nullptr;
         }
+#if defined(__riscv)
+        if (glx_ctx_) {
+            glXMakeCurrent(x_display_, None, nullptr);
+            glXDestroyContext(x_display_, glx_ctx_);
+            glx_ctx_ = nullptr;
+        }
+        if (x_window_) {
+            XDestroyWindow(x_display_, x_window_);
+            x_window_ = 0;
+        }
+        if (x_display_) {
+            XCloseDisplay(x_display_);
+            x_display_ = nullptr;
+        }
+#else
         if (window) {
             glfwDestroyWindow(window);
             window = nullptr;
         }
         glfwTerminate();
+#endif
     }
 };
 
@@ -577,6 +821,11 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
 
     auto start_time = std::chrono::steady_clock::now();
 
+#if defined(__riscv)
+    // riscv：启动独立渲染线程。
+    impl_->StartRenderThread();
+#endif
+
     while (impl_->IsAlive()) {
         // 外部停止条件
         if (continue_fn && !continue_fn())
@@ -593,6 +842,19 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
 
         auto step_start = std::chrono::steady_clock::now();
 
+#if defined(__riscv)
+        // riscv：加锁保护 mjData（与渲染线程的 mjv_updateScene 互斥）；渲染由渲染线程负责
+        {
+            std::lock_guard<std::mutex> lk(impl_->data_mutex_);
+            if (step_fn) {
+                auto cmd = step_fn(impl_->GetState());
+                if (cmd.has_value()) {
+                    SetControl(cmd.value());
+                }
+            }
+            impl_->Step();
+        }
+#else
         // 执行回调：有新指令才更新控制
         if (step_fn) {
             auto cmd = step_fn(impl_->GetState());
@@ -606,6 +868,7 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
         if (impl_->step_count_ % impl_->render_skip_ == 0) {
             impl_->Render();
         }
+#endif
 
         // 实时同步
         double step_duration =
@@ -615,6 +878,10 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
             std::this_thread::sleep_for(std::chrono::duration<double>(sleep_time));
         }
     }
+
+#if defined(__riscv)
+    impl_->StopRenderThread();
+#endif
 
     double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();

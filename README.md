@@ -9,39 +9,54 @@
 ## 功能特性
 
 **支持：**
-- 实时物理仿真（MuJoCo 3.4.0），内置渲染窗口
+- 实时物理仿真，内置渲染窗口（x86_64 用 MuJoCo 3.4.0 官方包；riscv64/K3 用 SpaceMIT bianbu26 预编译 3.4.0）
 - 悬挂保护（assist）：可动态调节高度，防止机器人摔倒损坏
 - 每步回调（StepFn）：调用方在回调中读取状态、下发控制指令
 - 运行时长控制：可指定仿真时长或持续运行直到窗口关闭
 - 键盘交互：悬挂高度调节、重置等
+- 平台：x86_64（PC 仿真）+ riscv64（K3 板卡，板上原生编译）
 
-**不支持：**
-- aarch64 / RISC-V 平台（MuJoCo 渲染依赖 OpenGL，仅支持 x86_64）
-- 无头（headless）模式
+**平台/渲染说明：**
+- MuJoCo 渲染器用桌面 OpenGL。x86_64 直接对接系统 OpenGL；riscv64 经 [gl4es](https://github.com/ptitSeb/gl4es) 翻译到 PowerVR GLES 后执行，窗口用裸 X11 + GLX（GLFW 与 gl4es 不兼容），渲染在独立线程。gl4es 由 CMake 自动获取、打补丁（`cmake/gl4es-imgtec-stencil.patch`）并编译。
+- 已知问题：启动一行 `OpenGL error 0x500` 告警可忽略。
+- 暂不支持无头（headless）模式。
 
 ## 快速开始
 
 ### 环境准备
 
-**PC 端（x86_64）**：
+系统依赖（分平台）：
 
 ```bash
-sudo apt install -y libglfw3-dev libyaml-cpp-dev cmake g++
+# 两平台通用
+sudo apt install -y libyaml-cpp-dev cmake g++
+# x86_64（PC）：窗口用 GLFW
+sudo apt install -y libglfw3-dev
+# riscv64（K3）：窗口用裸 X11 + gl4es，不用 GLFW
+sudo apt install -y libx11-dev
 ```
 
-MuJoCo 由 CMake 处理。CMake 按以下顺序查找，命中即用：
+> riscv64 的 gl4es 由 `cmake/FindGL4ES.cmake` 在首次配置时自动 git clone 固定 commit、应用补丁并编译；已有现成的可用 `-DGL4ES_ROOT=/path` 指向。
+
+MuJoCo 由 CMake 处理，**按架构自动选择预编译包来源**（包内布局一致，逻辑相同）：
+
+| 架构 | 版本 | 来源 |
+| :--- | :--- | :--- |
+| x86_64 | 3.4.0 | MuJoCo 官方 GitHub release |
+| riscv64（K3） | 3.4.0 | SpaceMIT bianbu26：`archive.spacemit.com/ros2/prebuilt_libs/bianbu26/opt/ext/mujoco/` |
+
+CMake 按以下顺序查找，命中即用：
 
 1. `-DMUJOCO_DIR=...` 编译参数
 2. 环境变量 `MUJOCO_DIR`
 3. `/usr/local`、`/opt/mujoco`
-4. 缓存路径 `~/.cache/thirdparty/mujoco/mujoco-3.4.0/`
-5. 上述均未命中：从官方 release 拉取 `mujoco-3.4.0-linux-x86_64.tar.gz` 解压到第 4 项缓存路径
+4. 缓存路径 `~/.cache/thirdparty/mujoco/mujoco-<版本>/`
+5. 上述均未命中：从对应架构的预编译包来源拉取并解压到第 4 项缓存路径
 
-> 离线/受限网络环境可设 `SROBOTIS_THIRDPARTY_FETCH_OFF=ON` 禁用第 6 步拉取，并通过
-> `export MUJOCO_DIR=/path/to/mujoco-3.4.0` 指向预先下载好的目录。其他版本见
-> [github.com/google-deepmind/mujoco/releases](https://github.com/google-deepmind/mujoco/releases)。
+> 离线/受限网络环境可设 `SROBOTIS_THIRDPARTY_FETCH_OFF=ON` 禁用第 5 步拉取，并通过
+> `export MUJOCO_DIR=/path/to/mujoco-<版本>` 指向预先下载好的目录。
 
-> **注意**：本模块仅支持 **x86_64** 平台（MuJoCo 渲染依赖 OpenGL，不支持 RISC-V 交叉编译）。CMakeLists.txt 在非 x86_64 平台会自动跳过，无需手动处理。
+> **注意**：riscv64 官方无预编译 release，故走 SpaceMIT archive 包；K3 的 GL 渲染经 gl4es 翻译到 PowerVR 硬件 GLES，详见上方"平台/渲染说明"。
 
 ### 构建编译
 
@@ -75,6 +90,8 @@ cd ~/spacemit_robot
 ./output/staging/bin/test_mujoco -h
 ```
 
+> riscv64（K3）须在板子的桌面会话里运行（窗口显示在板载屏幕上）。
+
 **键盘操作：**
 
 | 按键 | 功能 |
@@ -87,6 +104,18 @@ cd ~/spacemit_robot
 | 鼠标右键拖拽 | 平移视角 |
 | 滚轮 | 缩放 |
 | 关闭窗口 | 退出仿真 |
+
+### CI 测试
+
+模块自带 `test.yaml`（CI 用例清单）+ `tests/`，经 SDK 根目录的 `robot-test` 运行：
+
+```bash
+scripts/test/robot-test list components/simulation/mujoco
+scripts/test/robot-test run  components/simulation/mujoco --scope pr     # 参数/配置错误路径（无需显示器）
+scripts/test/robot-test run  components/simulation/mujoco --scope manual # 渲染+物理冒烟（需桌面会话/显示器）
+```
+
+`MujocoSim` 构造即建 GL 窗口、无 headless，故渲染冒烟归 manual；PR 档只验错误处理。
 
 ## 详细使用
 
@@ -179,17 +208,17 @@ using StepFn = std::function<std::optional<SimControl>(const SimState &)>;
 #### 注意事项
 
 1. **参数传入规则**：`robot_name`、`num_dof`、`xml_path`、`default_joint_pos`、`kp`、`kd` 由调用方传入而非由本模块从 YAML 读取。`xml_path` 必须为绝对路径，`FromYaml()` 会校验文件存在性。
-2. **平台限制**：本模块仅在 x86_64 平台编译和运行，CMakeLists.txt 通过 `CMAKE_SYSTEM_PROCESSOR` 检测架构，riscv64 上自动跳过，无需手动处理。
+2. **平台支持**：x86_64 + riscv64（K3）。CMakeLists.txt 通过 `CMAKE_SYSTEM_PROCESSOR` 检测架构并选择对应预编译包来源与渲染依赖（x86 → glfw；riscv → gl4es libGL + X11 + pthread，gl4es 由 FindGL4ES 自动获取编译）；其余架构（如 aarch64）自动跳过。K3 经 gl4es 走 PowerVR 硬件 GLES，见"平台/渲染说明"。
 3. **`Run()` 内部管理时序**：调用方无需自行维护 sleep、渲染跳帧等逻辑，`StepFn` 回调只需处理传感器读取和指令下发。
 4. **类型边界**：`SimState` / `SimControl` 是模块自有类型，不依赖任何外部数据结构。调用方负责在 SimState/SimControl 和其自身使用的数据类型之间做转换。
 
 ## 常见问题
 
-**Q：编译报 `libglfw3-dev not found`？**
-运行 `sudo apt install -y libglfw3-dev` 安装系统依赖。
+**Q：x86_64 编译报 `libglfw3-dev not found`？**
+运行 `sudo apt install -y libglfw3-dev` 安装。riscv64 不用 glfw（用 gl4es + X11）。
 
-**Q：在 aarch64 / RISC-V 上编译失败？**
-本模块仅支持 x86_64，CMakeLists.txt 在非 x86_64 平台会自动跳过，无需手动处理。
+**Q：riscv64（K3）上能编能跑吗？**
+能。CMake 检测到 riscv64 会自动拉 SpaceMIT bianbu26 的 mujoco 预编译包（3.4.0）并自动获取编译 gl4es，可视化经 gl4es 翻译到 PowerVR 硬件 GLES（详见"平台/渲染说明"）。在板子的桌面会话里直接跑 `run_*.sh` 或 test_mujoco 即可。aarch64 暂不支持，自动跳过。
 
 **Q：`xml_path` 报文件不存在？**
 `xml_path` 必须为绝对路径，且指向机器人 MuJoCo XML 场景文件。确认路径正确后重试。
