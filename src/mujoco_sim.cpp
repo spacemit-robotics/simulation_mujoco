@@ -139,6 +139,7 @@ public:
     bool button_right_ = false;
     double last_x_ = 0;
     double last_y_ = 0;
+    ObserveFn observe_fn_;
 
     // 执行器总开关：兼容 position/motor 等不同 actuator 类型
     void SetActuationEnabled(bool enabled) {
@@ -745,6 +746,17 @@ public:
         return state;
     }
 
+    void Observe() const {
+        if (!observe_fn_) {
+            return;
+        }
+        ObserveFrame frame;
+        frame.model = model;
+        frame.data = data;
+        frame.base_body_id = base_body_id_;
+        observe_fn_(GetState(), frame);
+    }
+
     void Cleanup() {
 #if defined(__riscv)
         // 确保渲染线程已停（正常 Run 结束时已 join；此处兜底）
@@ -853,6 +865,7 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
                 }
             }
             impl_->Step();
+            impl_->Observe();
         }
 #else
         // 执行回调：有新指令才更新控制
@@ -864,6 +877,7 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
         }
 
         impl_->Step();
+        impl_->Observe();
 
         if (impl_->step_count_ % impl_->render_skip_ == 0) {
             impl_->Render();
@@ -905,6 +919,10 @@ void Simulator::SetControl(const SimControl &ctrl) {
     impl_->target_vel_ = ctrl.target_vel;
     impl_->current_kp_ = ctrl.kp;
     impl_->current_kd_ = ctrl.kd;
+}
+
+void Simulator::SetObserveCallback(ObserveFn observe_fn) {
+    impl_->observe_fn_ = std::move(observe_fn);
 }
 
 const MujocoConfig &Simulator::GetConfig() const {

@@ -97,6 +97,21 @@ struct MujocoConfig {
 using StepFn = std::function<std::optional<SimControl>(const SimState &)>;
 
 /**
+ * @brief MuJoCo 每步只读观测帧
+ *
+ * model/data 使用 void* 暴露，避免让公共头文件强依赖 MuJoCo C API。
+ * 需要读取几何/站点等底层数据的扩展模块可在自己的实现文件中包含
+ * <mujoco/mujoco.h> 后转回 MuJoCo 的只读 model/data 指针。
+ */
+struct ObserveFrame {
+    const void *model = nullptr;
+    const void *data = nullptr;
+    int base_body_id = -1;
+};
+
+using ObserveFn = std::function<void(const SimState &, const ObserveFrame &)>;
+
+/**
  * @brief MuJoCo 仿真器
  */
 class Simulator {
@@ -145,6 +160,14 @@ public:
     void Run(StepFn step_fn = nullptr,
             std::function<bool()> continue_fn = nullptr,
             double duration = -1);
+
+    /**
+     * @brief 设置每步只读观测回调
+     *
+     * 回调在 mj_step 后、渲染前调用，可用于同一个 MuJoCo 实例上的传感器仿真。
+     * 回调内不应修改 model/data。
+     */
+    void SetObserveCallback(ObserveFn observe_fn);
 
     // ---- 状态访问 ----
 
