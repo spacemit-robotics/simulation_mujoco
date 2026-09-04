@@ -60,6 +60,7 @@ MujocoConfig MujocoConfig::FromYaml(const std::string &yaml_path,
         throw std::runtime_error("[MujocoConfig] 配置文件缺少 simulation.mujoco.sim_dt");
     }
     config.sim_dt = sim["sim_dt"].as<double>();
+    config.viewer = sim["viewer"] ? sim["viewer"].as<bool>() : true;
 
     config.assist_kp = sim["assist_kp"] ? sim["assist_kp"].as<double>() : 500.0;
     config.assist_kd = sim["assist_kd"] ? sim["assist_kd"].as<double>() : 100.0;

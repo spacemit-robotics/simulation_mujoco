@@ -1,7 +1,7 @@
 module: components/simulation/mujoco
 
-# 说明：MujocoSim 构造即创建 GL 窗口（无 headless 模式），故渲染/物理冒烟需桌面会话，
-# 归 manual。PR 档只验参数/配置错误处理（在窗口创建前失败，不需要显示器）。
+# viewer=false 时不创建 GL 窗口，可在 PR 档运行物理冒烟；渲染冒烟仍需桌面会话，
+# 归 manual。
 
 tests:
   - name: mujoco-error-path
@@ -28,3 +28,15 @@ tests:
       commands: [test_mujoco]
     command: |
       bash components/simulation/mujoco/tests/sim_smoke.sh
+
+  - name: mujoco-headless-smoke
+    description: >
+      viewer=false 物理冒烟：不依赖 DISPLAY，加载机型模型并按实时节拍运行数秒。
+    category: stability
+    scopes: [pr]
+    timeout_s: 120
+    workdir: sdk
+    requires:
+      commands: [test_mujoco, rg]
+    command: |
+      SROBOTIS_MJ_TEST_HEADLESS=1 bash components/simulation/mujoco/tests/sim_smoke.sh
