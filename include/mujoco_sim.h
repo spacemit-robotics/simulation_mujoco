@@ -62,6 +62,7 @@ struct MujocoConfig {
 
     // 仿真参数
     double sim_dt = 0.002;
+    bool viewer = true;
 
     // 控制器参数
     std::vector<double> kp;
@@ -75,7 +76,7 @@ struct MujocoConfig {
      * @param num_dof 控制自由度数量
      * @param xml_path MuJoCo XML 模型文件的绝对路径
      *
-     * 仅读取 YAML 的 simulation.mujoco 节点（init_height / sim_dt / assist_* 等）。
+     * 仅读取 YAML 的 simulation.mujoco 节点（init_height / sim_dt / viewer / assist_* 等）。
      * default_joint_pos / kp / kd 等机器人固有属性不在此读取，由调用方通过
      * Simulator 构造函数显式传入。
      */

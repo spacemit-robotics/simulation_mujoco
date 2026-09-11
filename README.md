@@ -170,6 +170,7 @@ scripts/test/robot-test run  components/simulation/mujoco --scope manual # 渲�
 | `assist_kp` | `double` | 悬挂 PD 刚度，默认 500.0 |
 | `assist_kd` | `double` | 悬挂 PD 阻尼，默认 100.0 |
 | `sim_dt` | `double` | 仿真时间步长（s） |
+| `viewer` | `bool` | 是否创建窗口并渲染，默认 true；设为 false 时仅运行物理仿真 |
 | `kp` / `kd` | `std::vector<double>` | 各关节 PD 增益，大小 = num_dof |
 | `default_joint_pos` | `std::vector<double>` | 默认关节角度（初始站立姿态），大小 = num_dof |
 
@@ -192,7 +193,7 @@ MuJoCo 仿真器主类，内部管理物理步进、实时同步、渲染和悬�
 | `AdjustAssistHeight` | `double delta` | `void` | 调整悬挂高度增量（m），正值上升 |
 | `GetAssistHeight` | — | `double` | 获取目标悬挂高度（m） |
 | `GetCurrentAssistHeight` | — | `double` | 获取当前实际悬挂高度（m），平滑过渡中可能与目标不同 |
-| `IsAlive` | — | `bool` | 查询仿真窗口是否存活 |
+| `IsAlive` | — | `bool` | 查询仿真是否仍在运行；headless 模式由外部停止条件或 duration 结束 |
 | `GetStepCount` | — | `int` | 获取累计仿真步数 |
 | `GetSimTime` | — | `double` | 获取仿真时间（s） |
 

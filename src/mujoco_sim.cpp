@@ -220,35 +220,39 @@ public:
 
         // x86：在此建窗口+GL 上下文；riscv64：推迟到渲染线程（见 RenderLoop）。
 #if !defined(__riscv)
-        WindowInit();
+        if (config.viewer) {
+            WindowInit();
+        }
 #endif
 
-        // 初始化渲染（mjv_* 纯 CPU，主线程；mjr_makeContext 需 GL 上下文）
-        mjv_defaultCamera(&cam);
-        cam.lookat[2] = kCameraLookatZ;
-        cam.azimuth = kCameraAzimuth;
-        cam.elevation = kCameraElevation;
-        cam.distance = kCameraDistance;
+        if (config.viewer) {
+            // 初始化渲染（mjv_* 纯 CPU，主线程；mjr_makeContext 需 GL 上下文）
+            mjv_defaultCamera(&cam);
+            cam.lookat[2] = kCameraLookatZ;
+            cam.azimuth = kCameraAzimuth;
+            cam.elevation = kCameraElevation;
+            cam.distance = kCameraDistance;
 
-        mjv_defaultOption(&opt);
-        mjv_defaultScene(&scn);
-        mjr_defaultContext(&con);
+            mjv_defaultOption(&opt);
+            mjv_defaultScene(&scn);
+            mjr_defaultContext(&con);
 
 #if defined(__riscv)
-        // riscv64（K3 PowerVR/gl4es）：关 MSAA、阴影。
-        model->vis.quality.offsamples = 0;
-        model->vis.quality.shadowsize = 0;
+            // riscv64（K3 PowerVR/gl4es）：关 MSAA、阴影。
+            model->vis.quality.offsamples = 0;
+            model->vis.quality.shadowsize = 0;
 #endif
 
-        mjv_makeScene(model, &scn, kMaxSceneObjects);
+            mjv_makeScene(model, &scn, kMaxSceneObjects);
 #if !defined(__riscv)
-        mjr_makeContext(model, &con, mjFONTSCALE_100);
-        gl_ready_ = true;
+            mjr_makeContext(model, &con, mjFONTSCALE_100);
+            gl_ready_ = true;
 #else
-        // riscv：mjr_makeContext 在渲染线程内调用（GL 上下文归该线程）；这里只设场景渲染标志
-        scn.flags[mjRND_SHADOW] = 0;
-        scn.flags[mjRND_REFLECTION] = 0;
+            // riscv：mjr_makeContext 在渲染线程内调用（GL 上下文归该线程）；这里只设场景渲染标志
+            scn.flags[mjRND_SHADOW] = 0;
+            scn.flags[mjRND_REFLECTION] = 0;
 #endif
+        }
 
         PrintInfo();
     }
@@ -259,10 +263,13 @@ public:
         std::cout << "[MuJoCo] 自由度: " << config.num_dof << std::endl;
         std::cout << "[MuJoCo] 悬挂保护: " << (assist_enabled_ ? "启用" : "禁用")
                 << " (高度: " << current_assist_height_ << "m)" << std::endl;
+        std::cout << "[MuJoCo] 可视化: " << (config.viewer ? "启用" : "禁用") << std::endl;
         std::cout << "[MuJoCo] 按 Ctrl+C 退出" << std::endl;
-        std::cout << "[MuJoCo] 按 F 键切换悬挂保护" << std::endl;
-        std::cout << "[MuJoCo] 按 ↑/↓ 键调节悬挂高度 (±5cm)" << std::endl;
-        std::cout << "[MuJoCo] 按 R 键重置悬挂高度到默认值" << std::endl;
+        if (config.viewer) {
+            std::cout << "[MuJoCo] 按 F 键切换悬挂保护" << std::endl;
+            std::cout << "[MuJoCo] 按 ↑/↓ 键调节悬挂高度 (±5cm)" << std::endl;
+            std::cout << "[MuJoCo] 按 R 键重置悬挂高度到默认值" << std::endl;
+        }
     }
 
     int FindFloatingBaseBody() {
@@ -682,6 +689,9 @@ public:
 #endif
 
     bool IsAlive() const {
+        if (!config.viewer) {
+            return true;
+        }
 #if defined(__riscv)
         // 窗口在渲染线程创建，物理循环以 render_running_ 为存活依据（窗口关闭→should_close_）
         return render_running_ && !should_close_;
@@ -832,10 +842,16 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
     impl_->Reset();
 
     auto start_time = std::chrono::steady_clock::now();
+    auto next_step_time = start_time;
+    const auto step_period = std::chrono::duration_cast<
+        std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(impl_->model->opt.timestep));
 
 #if defined(__riscv)
     // riscv：启动独立渲染线程。
-    impl_->StartRenderThread();
+    if (impl_->config.viewer) {
+        impl_->StartRenderThread();
+    }
 #endif
 
     while (impl_->IsAlive()) {
@@ -851,8 +867,6 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
             if (elapsed >= duration)
                 break;
         }
-
-        auto step_start = std::chrono::steady_clock::now();
 
 #if defined(__riscv)
         // riscv：加锁保护 mjData（与渲染线程的 mjv_updateScene 互斥）；渲染由渲染线程负责
@@ -879,22 +893,20 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
         impl_->Step();
         impl_->Observe();
 
-        if (impl_->step_count_ % impl_->render_skip_ == 0) {
+        if (impl_->config.viewer && impl_->step_count_ % impl_->render_skip_ == 0) {
             impl_->Render();
         }
 #endif
 
-        // 实时同步
-        double step_duration =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - step_start).count();
-        double sleep_time = impl_->model->opt.timestep - step_duration;
-        if (sleep_time > 0) {
-            std::this_thread::sleep_for(std::chrono::duration<double>(sleep_time));
-        }
+        // 按绝对截止时间同步，避免高频 sleep_for 的唤醒误差逐步累积。
+        next_step_time += step_period;
+        std::this_thread::sleep_until(next_step_time);
     }
 
 #if defined(__riscv)
-    impl_->StopRenderThread();
+    if (impl_->config.viewer) {
+        impl_->StopRenderThread();
+    }
 #endif
 
     double elapsed =
