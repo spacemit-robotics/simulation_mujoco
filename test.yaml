@@ -37,6 +37,6 @@ tests:
     timeout_s: 120
     workdir: sdk
     requires:
-      commands: [test_mujoco, rg]
+      commands: [test_mujoco]
     command: |
       SROBOTIS_MJ_TEST_HEADLESS=1 bash components/simulation/mujoco/tests/sim_smoke.sh

@@ -32,7 +32,7 @@ if [[ "$HEADLESS" == "1" ]]; then
   TEMP_DIR=$(mktemp -d)
   CONFIG_FOR_RUN="$TEMP_DIR/headless.yaml"
   cp "$CONFIG" "$CONFIG_FOR_RUN"
-  if rg -q '^[[:space:]]+viewer:' "$CONFIG_FOR_RUN"; then
+  if grep -Eq '^[[:space:]]+viewer:' "$CONFIG_FOR_RUN"; then
     sed -i 's/^\([[:space:]]*\)viewer:.*/\1viewer: false/' "$CONFIG_FOR_RUN"
   else
     sed -i '/^[[:space:]]*sim_dt:/a\    viewer: false' "$CONFIG_FOR_RUN"
