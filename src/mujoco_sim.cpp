@@ -24,11 +24,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>  // NOLINT(build/c++17)
 #include <iostream>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -43,6 +45,9 @@ constexpr int kWindowHeight = 600;
 
 // 渲染配置
 constexpr int kMaxSceneObjects = 2000;
+#if !defined(__riscv)
+constexpr auto kRenderPeriod = std::chrono::microseconds(16667);
+#endif
 
 // 相机默认参数
 constexpr double kCameraLookatZ = 0.9;
@@ -101,6 +106,11 @@ public:
     std::mutex data_mutex_;  // 保护 mjData：物理 Step 与渲染 mjv_updateScene 互斥
 #else
     GLFWwindow *window = nullptr;
+    mjModel *render_model_ = nullptr;
+    mjData *render_data_ = nullptr;
+    mjData *render_snapshot_ = nullptr;
+    std::mutex snapshot_mutex_;
+    bool snapshot_ready_ = false;
 #endif
     int win_width_ = kWindowWidth;
     int win_height_ = kWindowHeight;
@@ -120,7 +130,7 @@ public:
     bool is_position_actuator_ = false;
 
     // 悬挂控制
-    // 以下三个量由渲染线程（riscv X11 按键）与物理线程 Step 并发访问，用 atomic；data_mutex_ 只保护 mjData。
+    // 键盘输入与物理线程 Step 并发访问悬挂参数。
     std::atomic<bool> assist_enabled_{true};
     double assist_kp_ = 500.0;
     double assist_kd_ = 100.0;
@@ -130,8 +140,7 @@ public:
 
     // 仿真状态
     int step_count_ = 0;
-    int render_skip_ = 16;
-    bool window_alive_ = true;
+    std::atomic<bool> window_alive_{true};
 
     // 鼠标状态
     bool button_left_ = false;
@@ -247,6 +256,16 @@ public:
 #if !defined(__riscv)
             mjr_makeContext(model, &con, mjFONTSCALE_100);
             gl_ready_ = true;
+            // 渲染不读取物理线程会修改的 model/data。
+            render_model_ = mj_copyModel(nullptr, model);
+            if (!render_model_) {
+                throw std::runtime_error("failed to allocate MuJoCo render model");
+            }
+            render_data_ = mj_makeData(render_model_);
+            render_snapshot_ = mj_makeData(render_model_);
+            if (!render_data_ || !render_snapshot_) {
+                throw std::runtime_error("failed to allocate MuJoCo render snapshots");
+            }
 #else
             // riscv：mjr_makeContext 在渲染线程内调用（GL 上下文归该线程）；这里只设场景渲染标志
             scn.flags[mjRND_SHADOW] = 0;
@@ -345,6 +364,14 @@ public:
     }
 
     // ---- 共享输入语义（GLFW 回调与 X11 事件循环共用） ----
+    const mjModel *CameraModel() const {
+#if defined(__riscv)
+        return model;
+#else
+        return render_model_;
+#endif
+    }
+
     void InputToggleAssist() {
         assist_enabled_ = !assist_enabled_;
         std::cout << "\n[MuJoCo] 悬挂保护: " << (assist_enabled_ ? "启用" : "禁用") << std::endl;
@@ -373,10 +400,10 @@ public:
         } else {
             action = mjMOUSE_ZOOM;
         }
-        mjv_moveCamera(model, action, dx / height, dy / height, &scn, &cam);
+        mjv_moveCamera(CameraModel(), action, dx / height, dy / height, &scn, &cam);
     }
     void InputScroll(double yoffset) {
-        mjv_moveCamera(model, mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn, &cam);
+        mjv_moveCamera(CameraModel(), mjMOUSE_ZOOM, 0, 0.05 * yoffset, &scn, &cam);
     }
 
 #if defined(__riscv)
@@ -677,14 +704,30 @@ public:
     }
 
 #if !defined(__riscv)
+    void PublishRenderSnapshot() {
+        // 画面允许丢帧；物理步进和通信不等待渲染方交换快照。
+        std::unique_lock<std::mutex> lock(snapshot_mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) return;
+        mj_copyData(render_snapshot_, model, data);
+        snapshot_ready_ = true;
+    }
+
     // riscv 下渲染由 RenderLoop 在独立线程负责，不走此路径。
     void Render() {
+        {
+            std::lock_guard<std::mutex> lock(snapshot_mutex_);
+            if (snapshot_ready_) {
+                std::swap(render_data_, render_snapshot_);
+                snapshot_ready_ = false;
+            }
+        }
         mjrRect viewport = {0, 0, 0, 0};
         glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
-        mjv_updateScene(model, data, &opt, nullptr, &cam, mjCAT_ALL, &scn);
+        mjv_updateScene(render_model_, render_data_, &opt, nullptr, &cam, mjCAT_ALL, &scn);
         mjr_render(viewport, &scn, &con);
         glfwSwapBuffers(window);
         glfwPollEvents();
+        window_alive_ = !glfwWindowShouldClose(window);
     }
 #endif
 
@@ -696,7 +739,7 @@ public:
         // 窗口在渲染线程创建，物理循环以 render_running_ 为存活依据（窗口关闭→should_close_）
         return render_running_ && !should_close_;
 #else
-        return window && !glfwWindowShouldClose(window);
+        return window_alive_;
 #endif
     }
 
@@ -784,6 +827,20 @@ public:
             mjr_freeContext(&con);
             gl_ready_ = false;
         }
+#if !defined(__riscv)
+        if (render_data_) {
+            mj_deleteData(render_data_);
+            render_data_ = nullptr;
+        }
+        if (render_snapshot_) {
+            mj_deleteData(render_snapshot_);
+            render_snapshot_ = nullptr;
+        }
+        if (render_model_) {
+            mj_deleteModel(render_model_);
+            render_model_ = nullptr;
+        }
+#endif
         if (data) {
             mj_deleteData(data);
             data = nullptr;
@@ -827,7 +884,12 @@ Simulator::Simulator(const std::string &yaml_path,
                     const std::vector<double> &kd,
                     bool assist)
     : impl_(std::make_unique<Impl>()) {
-    impl_->Init(yaml_path, robot_name, num_dof, xml_path, default_joint_pos, kp, kd, assist);
+    try {
+        impl_->Init(yaml_path, robot_name, num_dof, xml_path, default_joint_pos, kp, kd, assist);
+    } catch (...) {
+        impl_->Cleanup();
+        throw;
+    }
 }
 
 Simulator::~Simulator() {
@@ -842,70 +904,92 @@ void Simulator::Run(StepFn step_fn, std::function<bool()> continue_fn, double du
     impl_->Reset();
 
     auto start_time = std::chrono::steady_clock::now();
-    auto next_step_time = start_time;
     const auto step_period = std::chrono::duration_cast<
         std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(impl_->model->opt.timestep));
 
+    const auto run_physics = [&]() {
+        auto next_step_time = start_time;
+#if !defined(__riscv)
+        auto next_snapshot_time = start_time;
+#endif
+        while (impl_->IsAlive()) {
+            if (continue_fn && !continue_fn())
+                break;
+
+            if (duration > 0 && std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - start_time).count() >= duration)
+                break;
+
+            {
 #if defined(__riscv)
-    // riscv：启动独立渲染线程。
+                // K3 渲染仅在 mjv_updateScene 读取物理数据时持锁。
+                std::lock_guard<std::mutex> lock(impl_->data_mutex_);
+#endif
+                if (step_fn) {
+                    auto cmd = step_fn(impl_->GetState());
+                    if (cmd.has_value()) {
+                        SetControl(cmd.value());
+                    }
+                }
+                impl_->Step();
+                impl_->Observe();
+            }
+#if !defined(__riscv)
+            const auto now = std::chrono::steady_clock::now();
+            if (impl_->config.viewer && now >= next_snapshot_time) {
+                impl_->PublishRenderSnapshot();
+                next_snapshot_time = now + kRenderPeriod;
+            }
+#endif
+            next_step_time += step_period;
+            std::this_thread::sleep_until(next_step_time);
+        }
+    };
+
+#if defined(__riscv)
     if (impl_->config.viewer) {
         impl_->StartRenderThread();
     }
-#endif
-
-    while (impl_->IsAlive()) {
-        // 外部停止条件
-        if (continue_fn && !continue_fn())
-            break;
-
-        // 时长限制
-        if (duration > 0) {
-            double elapsed =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time)
-                    .count();
-            if (elapsed >= duration)
-                break;
-        }
-
-#if defined(__riscv)
-        // riscv：加锁保护 mjData（与渲染线程的 mjv_updateScene 互斥）；渲染由渲染线程负责
-        {
-            std::lock_guard<std::mutex> lk(impl_->data_mutex_);
-            if (step_fn) {
-                auto cmd = step_fn(impl_->GetState());
-                if (cmd.has_value()) {
-                    SetControl(cmd.value());
-                }
-            }
-            impl_->Step();
-            impl_->Observe();
-        }
-#else
-        // 执行回调：有新指令才更新控制
-        if (step_fn) {
-            auto cmd = step_fn(impl_->GetState());
-            if (cmd.has_value()) {
-                SetControl(cmd.value());
-            }
-        }
-
-        impl_->Step();
-        impl_->Observe();
-
-        if (impl_->config.viewer && impl_->step_count_ % impl_->render_skip_ == 0) {
-            impl_->Render();
-        }
-#endif
-
-        // 按绝对截止时间同步，避免高频 sleep_for 的唤醒误差逐步累积。
-        next_step_time += step_period;
-        std::this_thread::sleep_until(next_step_time);
+    try {
+        run_physics();
+    } catch (...) {
+        impl_->StopRenderThread();
+        throw;
     }
-
-#if defined(__riscv)
     if (impl_->config.viewer) {
         impl_->StopRenderThread();
+    }
+#else
+    if (impl_->config.viewer) {
+        // GLFW 窗口和事件属于调用主线程；物理回调与通信在独立线程。
+        impl_->window_alive_ = !glfwWindowShouldClose(impl_->window);
+        impl_->PublishRenderSnapshot();
+        std::atomic<bool> physics_running{true};
+        std::exception_ptr physics_error;
+        std::thread physics_thread([&]() {
+            try {
+                run_physics();
+            } catch (...) {
+                physics_error = std::current_exception();
+            }
+            physics_running = false;
+        });
+        try {
+            while (physics_running && impl_->window_alive_) {
+                const auto frame_start = std::chrono::steady_clock::now();
+                impl_->Render();
+                std::this_thread::sleep_until(frame_start + kRenderPeriod);
+            }
+        } catch (...) {
+            impl_->window_alive_ = false;
+            physics_thread.join();
+            throw;
+        }
+        physics_thread.join();
+        if (physics_error) std::rethrow_exception(physics_error);
+    } else {
+        run_physics();
     }
 #endif
 

@@ -1,0 +1,11 @@
+<mujoco model="render_threading">
+  <worldbody>
+    <body pos="0 0 0.5">
+      <joint name="test_joint" type="hinge" axis="0 1 0"/>
+      <geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.02" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor joint="test_joint"/>
+  </actuator>
+</mujoco>

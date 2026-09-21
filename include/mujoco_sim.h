@@ -150,7 +150,9 @@ public:
     /**
      * @brief 运行仿真主循环
      *
-     * 内部管理计时、实时同步、渲染跳帧。
+     * 内部管理计时、实时同步及独立于物理步进的绘图。
+     * PC viewer 模式须在主线程调用；物理回调运行在内部工作线程。
+     * K3 及 headless 模式的物理回调运行在调用线程。
      *
      * @param step_fn  每步回调（可选）：传入当前状态，返回控制指令；
      *                 传入 nullptr 时保持 default_joint_pos 不变。
@@ -165,7 +167,8 @@ public:
     /**
      * @brief 设置每步只读观测回调
      *
-     * 回调在 mj_step 后、渲染前调用，可用于同一个 MuJoCo 实例上的传感器仿真。
+     * 回调在物理线程的 mj_step 后调用，可用于同一个 MuJoCo 实例上的传感器仿真。
+     * 显示渲染独立运行；耗时观测回调仍会占用物理周期。
      * 回调内不应修改 model/data。
      */
     void SetObserveCallback(ObserveFn observe_fn);
