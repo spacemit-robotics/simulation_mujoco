@@ -9,16 +9,16 @@
 ## 功能特性
 
 **支持：**
-- 实时物理仿真，内置渲染窗口（x86_64 用 MuJoCo 3.4.0 官方包；riscv64/K3 用 SpaceMIT bianbu26 预编译 3.4.0）
+- 实时物理仿真，可选渲染窗口（x86_64 用 MuJoCo 3.4.0 官方包；riscv64/K3 用 SpaceMIT bianbu26 预编译 3.4.0）
 - 悬挂保护（assist）：可动态调节高度，防止机器人摔倒损坏
 - 每步回调（StepFn）：调用方在回调中读取状态、下发控制指令
-- 运行时长控制：可指定仿真时长或持续运行直到窗口关闭
+- 运行时长控制：可指定时长，也可由窗口关闭或调用方的停止条件结束
 - 键盘交互：悬挂高度调节、重置等
 - 平台：x86_64（PC 仿真）+ riscv64（K3 板卡，板上原生编译）
 
 **平台/渲染说明：**
 - MuJoCo 渲染器用桌面 OpenGL。x86_64 直接对接系统 OpenGL；riscv64 经 [gl4es](https://github.com/ptitSeb/gl4es) 翻译到 PowerVR GLES 后执行，窗口用裸 X11 + GLX（GLFW 与 gl4es 不兼容），渲染在独立线程。gl4es 由 CMake 自动获取、打补丁（`cmake/gl4es-imgtec-stencil.patch`）并编译。
-- PC 的 GLFW 窗口、绘图和事件处理留在主线程，物理步进及 `StepFn` 状态收发在独立工作线程。绘图最多 60 Hz，读取独立模型和双缓冲状态快照；物理线程发布快照时不等待锁，渲染来不及时允许跳过画面更新。场景更新、绘图、垂直同步和窗口事件均不持有物理数据锁。K3 保留原有独立渲染线程。
+- 开启窗口时，PC 在主线程处理窗口和绘图、在工作线程运行物理仿真；物理线程不等待绘图，画面更新跟不上时可以跳帧。K3 在调用线程运行物理仿真、在独立线程绘图。
 - 已知问题：启动一行 `OpenGL error 0x500` 告警可忽略。
 - `simulation.mujoco.viewer: false` 为无窗口模式，不创建绘图线程或 GL 窗口。
 
@@ -116,8 +116,8 @@ scripts/test/robot-test run  components/simulation/mujoco --scope pr     # 参�
 scripts/test/robot-test run  components/simulation/mujoco --scope manual # 渲染+物理冒烟（需桌面会话/显示器）
 ```
 
-真实窗口的渲染冒烟归 manual；PR 档包含错误处理和无窗口物理冒烟。
-PC 构建还提供 CTest `mujoco_render_threading`：替换图形入口以模拟场景更新、绘制、交换画面和事件处理卡顿，验证物理回调继续推进、快照稳定以及退出和异常处理，无需显示器。
+PR 档覆盖错误处理和无窗口物理仿真；真实窗口测试需要桌面会话，归 manual。
+PC 构建另提供无需显示器的 CTest `mujoco_render_threading`，检查绘图耗时不阻塞物理回调，并覆盖退出和异常处理。
 
 ## 详细使用
 
@@ -184,7 +184,7 @@ MuJoCo 仿真器主类，内部管理物理步进、实时同步、渲染和悬�
 | :--- | :--- | :--- | :--- |
 | 构造 | `yaml_path, robot_name, num_dof, xml_path, default_joint_pos, kp={}, kd={}, assist=true` | — | 加载 `simulation.mujoco` 仿真参数并初始化 MuJoCo 场景；`default_joint_pos` 必传，`kp/kd` 为 MuJoCo 启动初始增益（可选） |
 | `Reset` | — | `void` | 重置仿真到初始状态 |
-| `Run` | `step_fn, continue_fn, duration=-1` | `void` | 运行主循环，内部管理计时、实时同步及独立绘图；`duration=-1` 表示持续运行 |
+| `Run` | `step_fn, continue_fn, duration=-1` | `void` | 按实时节拍运行物理仿真，可选窗口渲染；`duration=-1` 表示持续运行 |
 | `GetState` | — | `SimState` | 获取当前机器人状态 |
 | `SetControl` | `const SimControl &ctrl` | `void` | 设置完整控制指令 |
 | `GetConfig` | — | `const MujocoConfig &` | 获取当前仿真配置（只读） |
@@ -212,7 +212,7 @@ using StepFn = std::function<std::optional<SimControl>(const SimState &)>;
 
 1. **参数传入规则**：`robot_name`、`num_dof`、`xml_path`、`default_joint_pos`、`kp`、`kd` 由调用方传入而非由本模块从 YAML 读取。`xml_path` 必须为绝对路径，`FromYaml()` 会校验文件存在性。
 2. **平台支持**：x86_64 + riscv64（K3）。CMakeLists.txt 通过 `CMAKE_SYSTEM_PROCESSOR` 检测架构并选择对应预编译包来源与渲染依赖（x86 → glfw；riscv → gl4es libGL + X11 + pthread，gl4es 由 FindGL4ES 自动获取编译）；其余架构（如 aarch64）自动跳过。K3 经 gl4es 走 PowerVR 硬件 GLES，见"平台/渲染说明"。
-3. **`Run()` 内部管理时序**：PC viewer 模式须在主线程创建、运行和销毁 `Simulator`，以满足 GLFW 窗口规则。`StepFn`、`ObserveFn` 和 `continue_fn` 在物理工作线程调用，返回前会停止并回收该线程；回调异常会传播给 `Run()` 调用方。K3 和无窗口模式的物理回调仍在调用线程执行。回调应避免耗时操作，实时性能仍受物理计算和系统调度影响。
+3. **线程与回调**：PC 开窗模式须在主线程构造、运行和销毁 `Simulator`；`StepFn`、`ObserveFn`、`continue_fn` 在内部物理线程执行。K3 和无窗口模式的回调在调用 `Run()` 的线程执行。调用方跨线程共享数据时须自行同步；回调异常会传给 `Run()` 调用方。耗时回调仍会影响物理实时性。
 4. **类型边界**：`SimState` / `SimControl` 是模块自有类型，不依赖任何外部数据结构。调用方负责在 SimState/SimControl 和其自身使用的数据类型之间做转换。
 
 ## 常见问题
