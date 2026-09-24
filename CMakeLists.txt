@@ -22,13 +22,13 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 
 include(cmake/FindMuJoCo.cmake)
 find_package(yaml-cpp REQUIRED)
+find_package(Threads REQUIRED)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64|riscv")
     # riscv64（K3）：窗口用 X11，GL 上下文用 gl4es 提供的 libGL（含 GLX），
     # 经 gl4es 把 MuJoCo 的桌面 GL 翻译到 PowerVR GLES。gl4es 由 FindGL4ES 按三方包惯例
     # 自动 git clone 固定 commit + 打补丁 + 编译（见 cmake/FindGL4ES.cmake）。
     find_package(X11 REQUIRED)
-    find_package(Threads REQUIRED)  # 渲染线程
     include(cmake/FindGL4ES.cmake)
 else()
     find_package(glfw3 REQUIRED)
@@ -62,9 +62,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64|riscv")
     )
 else()
     target_link_libraries(mujoco_sim
-        PUBLIC  ${MUJOCO_LIB} glfw
+        PUBLIC  ${MUJOCO_LIB} glfw Threads::Threads
         PRIVATE yaml-cpp
     )
+endif()
+
+include(CTest)
+if(BUILD_TESTING AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    add_executable(test_mujoco_render_threading tests/test_render_threading.cpp)
+    target_link_libraries(test_mujoco_render_threading PRIVATE mujoco_sim)
+    # The test replaces graphics entry points without opening a real window.
+    set_target_properties(test_mujoco_render_threading PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME mujoco_render_threading
+        COMMAND test_mujoco_render_threading ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    set_tests_properties(mujoco_render_threading PROPERTIES TIMEOUT 20)
 endif()
 
 # ============================================================================

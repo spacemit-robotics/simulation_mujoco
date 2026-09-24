@@ -1,0 +1,4 @@
+simulation:
+  mujoco:
+    sim_dt: 0.001
+    viewer: true
